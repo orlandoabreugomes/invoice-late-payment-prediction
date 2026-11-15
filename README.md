@@ -2,7 +2,7 @@
 
 Machine Learning Zoomcamp project: predict whether an invoice will be paid after its due date.
 
-> **Status:** the notebook is finished (data, three models, final test). `train.py`, the API and Docker are still to do.
+> **Status:** complete. Notebook with three models, `train.py`, a Flask web service, Docker and a deployment on AWS Elastic Beanstalk.
 
 ## Problem
 
@@ -76,12 +76,17 @@ The final model is chosen by the validation AUC. The test AUC is shown as a chec
 
 **Final model: XGBoost.** Trained again on train + validation (80% of the data), its **test AUC is 0.8840**.
 
-## Next steps
+## Files
 
-* `train.py` (trains the final XGBoost and saves it with the `DictVectorizer` using `pickle`).
-* `predict.py` (FastAPI) and a request example.
-* `Dockerfile` and `requirements.txt` (pinned versions).
-* "How to run" section with a screenshot of the API working.
+| File | Purpose |
+|---|---|
+| `notebook.ipynb` | Data preparation, the three models, tuning and the final test |
+| `train.py` | Trains the final XGBoost and saves it with the `DictVectorizer` to `model.bin` |
+| `model.bin` | The saved model |
+| `predict.py` | Flask web service with one endpoint, `POST /predict` |
+| `test.py` | Sends an example invoice to the local service |
+| `test_AWS.py` | Sends the same invoice to the service on AWS and prints the details of the communication |
+| `Dockerfile`, `requirements.txt` | Container and pinned library versions |
 
 ## Library versions
 
@@ -102,6 +107,41 @@ docker run -it --rm -p 9696:9696 invoice-late-payment
 python test.py                                    # in another terminal
 ```
 
-Expected answer: `{'late_probability': 0.302, 'late': False}`
+`train.py` downloads the dataset with `kagglehub`. `model.bin` is already in the repository, so the Docker image can be built without training.
 
-![API working](screenshot_test_py.png)
+The service receives one invoice as JSON (dates as `YYYY-MM-DD`) and returns the probability of late payment:
+
+```json
+{
+  "business_code": "U001",
+  "cust_number": "200744019",
+  "invoice_currency": "USD",
+  "cust_payment_terms": "NAA8",
+  "total_open_amount": 11173.02,
+  "posting_date": "2020-03-19",
+  "baseline_create_date": "2020-03-19",
+  "due_in_date": "2020-04-03"
+}
+```
+
+Expected answer: `{'late': False, 'late_probability': 0.302}`
+
+![Local service answering](screenshot_test_py.png)
+
+## Cloud deployment on AWS Elastic Beanstalk
+
+The same Docker image was deployed with the Elastic Beanstalk command line tool:
+
+```bash
+pip install awsebcli
+eb init -p docker -r us-east-1 invoice-late-payment
+eb create invoice-late-payment-env --single --instance_type t3.small
+python test_AWS.py                                # uses the address printed by eb create
+eb terminate invoice-late-payment-env             # when finished
+```
+
+`test_AWS.py` prints the address and IP of the server, the status code and the prediction. The answer came from the AWS server (`nginx` proxy, public IP), with the same prediction as the local service:
+
+![Service answering on AWS](screenshot_test_aws_py.png)
+
+The environment was terminated after the test to avoid costs, so the address in `test_AWS.py` is no longer online. To repeat the test, run the commands above and put the new address in `test_AWS.py`.
