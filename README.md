@@ -2,67 +2,86 @@
 
 Machine Learning Zoomcamp project: predict whether an invoice will be paid after its due date.
 
-> **Status (work in progress):** data cleaning, target, features and the logistic-regression experiments are done. Tree models, `train.py`, the API and Docker are still to do.
+> **Status:** the notebook is finished (data, three models, final test). `train.py`, the API and Docker are still to do.
 
 ## Problem
 
 Late payments hurt cash flow. Given the information available when an invoice is issued (customer, amount, currency, payment terms, dates), the model predicts the probability that the invoice will be paid **after its due date** (`late = 1`). A collections team could use it to prioritize which customers to contact first.
 
-## Dataset
+All the analysis is in [`notebook.ipynb`](notebook.ipynb). The sections below follow the notebook's numbering.
 
-- Kaggle: [Payment Date Dataset](https://www.kaggle.com/datasets/rajattomar132/payment-date-dataset) (`rajattomar132/payment-date-dataset`).
-- 50,000 invoices posted between Dec 2018 and May 2020, 19 columns. Loaded in the notebook with `kagglehub`.
-- The dataset has no official data dictionary; column meanings were inferred from their names and values.
+## 1. Dataset: download and cleaning
 
-## What has been done
+- **1.1 Download.** Kaggle [Payment Date Dataset](https://www.kaggle.com/datasets/rajattomar132/payment-date-dataset) (`rajattomar132/payment-date-dataset`), loaded with `kagglehub`. 50,000 invoices posted between Dec 2018 and May 2020, 19 columns. The dataset has no official data dictionary; column meanings were inferred from their names and values.
+- **1.2 Cleaning.**
+  - Column names to lowercase; text values to lowercase with `_` instead of spaces.
+  - 1,161 duplicated rows (identical in every column) were removed.
+  - Useless columns were dropped: `document_create_date.1`, `area_business` (empty), `document_type` (almost constant), `invoice_id` (identifier with nulls), `posting_id` (constant).
+- **1.3 Dates.** `yyyymmdd` integers and month/day/year text were converted to `datetime64`.
+- **1.4 Target `late`.**
+  - Only paid invoices (`isopen == 0`) are used: `late = 1` if `clear_date > due_in_date`, else `0`.
+  - The 9,681 open invoices were left out of training. All of them were posted after Feb 27, 2020, and all paid invoices were posted before that date, even though payments are recorded up to May 22, 2020. This is a cut in time (the payment date is not available for the newest invoices), so "open" does not mean "late". They are kept apart as the invoices a deployed model would score.
+  - `clear_date` and `isopen` were deleted afterwards to avoid leakage.
+  - Result: 39,158 labeled invoices, late rate 0.419.
+- **1.5 Features.**
+  - Numerical: `days_allowed` (due date minus baseline date), `days_to_due` (due date minus posting date), `due_month`, `due_weekday`, `due_on_weekend`, `log_amount` (`log1p` of the amount; skewness 2.76 before the log, -0.97 after).
+  - Categorical: `business_code`, `invoice_currency`, `cust_payment_terms`, `cust_number`.
+- **1.6 Split.** Random 60% train / 20% validation / 20% test (`random_state=1`).
 
-All steps are in [`notebook.ipynb`](notebook.ipynb).
+## 2. Logistic regression
 
-1. **Cleaning**
-   - Column names to lowercase; text values to lowercase with `_` instead of spaces.
-   - **1,161 duplicated rows** (identical in every column) were removed.
-   - Useless columns were dropped: `document_create_date.1`, `area_business` (empty), `document_type` (almost constant), `invoice_id` (identifier with nulls), `posting_id` (constant).
-2. **Dates:** `yyyymmdd` integers and month/day/year text were converted to `datetime64`. `clear_date` (payment date) is empty for open invoices.
-3. **Target `late`**
-   - Only **paid invoices** (`isopen == 0`) are used: `late = 1` if `clear_date > due_in_date`, else `0`.
-   - The 9,681 **open invoices** were left out of training. All of them were posted after Feb 27, 2020, and all paid invoices were posted before that date, even though payments are recorded up to May 22, 2020. This is a cut in time (the payment date is not available for the newest invoices), so "open" does not mean "late". They are kept apart as the invoices a deployed model would score.
-   - `clear_date` and `isopen` were deleted afterwards to avoid leakage.
-   - Result: **39,158 labeled invoices, late rate = 0.419**.
-4. **Features**
-   - `days_allowed` (due date minus baseline date), `days_to_due` (due date minus posting date).
-   - `due_month`, `due_weekday`, `due_on_weekend`.
-   - `log_amount` = `log1p(total_open_amount)`; the raw amount is very skewed (skewness 2.76 vs -0.97 after the log).
-   - Categorical: `business_code`, `invoice_currency`, `cust_payment_terms`, `cust_number`.
-5. **Split:** random 60% train / 20% validation / 20% test (`random_state=1`). A time-based split was also tested (see below).
-6. **Model:** logistic regression with standardized numerical features (scaler fitted on the training set only) and one-hot encoded categorical features (`DictVectorizer`). Metric: ROC AUC on validation.
+Numerical features standardized (scaler fitted on the training set only), categorical features one-hot encoded with `DictVectorizer`. Metric: ROC AUC on validation.
 
-## Experiments
+| # | Numerical features | AUC, random split | AUC, time split | Notes |
+|---|---|---|---|---|
+| 2.1 | all 6 (baseline, default settings) | 0.8460 | n/a | `max_iter=100`, convergence warning |
+| 2.2 | base: `log_amount`, `days_allowed`, `days_to_due` | 0.8131 | 0.8081 | `liblinear`, `max_iter=1000` from here on |
+| 2.2 | base + `due_on_weekend` | 0.8443 | 0.8382 | Biggest gain |
+| 2.2 | base + `due_weekday` | 0.8258 | 0.8189 | |
+| 2.2 | base + `due_month` | 0.8131 | 0.8079 | No gain |
+| 2.2 | base + all calendar features | **0.8463** | 0.8403 | Best logistic regression |
 
-Validation AUC. The test set is used once, at the end.
+- **2.3 Random vs time-based split.** The time-based split trains on the oldest 60% of invoices (Dec 2018 to Aug 2019), validates on the next 20% and tests on the newest 20% (Nov 2019 to Feb 2020). Its AUC is only about 0.006 lower, and the late rate is stable over time (0.43 / 0.43 / 0.39), so the random split is kept.
+- **2.4 Result.** Best feature set: base + all calendar features. A due date on a weekend is the most useful calendar feature (payment tends to slip to Monday). The same features are used for the tree models.
 
-| # | Experiment | Numerical features | Model | AUC, random split | AUC, time split | Notes |
-|---|---|---|---|---|---|---|
-| 0 | First baseline | all 6 numerical features | Logistic regression (default settings) | 0.846 | n/a | `max_iter=100` |
-| 1 | Base (no calendar features) | `log_amount`, `days_allowed`, `days_to_due` | Logistic regression (`liblinear`, `max_iter=1000`) | 0.8131 | 0.8081 | |
-| 2 | + `due_on_weekend` | base + `due_on_weekend` | same | 0.8443 | 0.8382 | Biggest gain |
-| 3 | + `due_weekday` | base + `due_weekday` | same | 0.8258 | 0.8189 | |
-| 4 | + `due_month` | base + `due_month` | same | 0.8131 | 0.8079 | No gain |
-| 5 | All calendar features | base + `due_month`, `due_weekday`, `due_on_weekend` | same | 0.8463 | 0.8403 | |
-| 6 | Best feature set | _fill in_ | Random forest | _fill in_ | | |
-| 7 | Best feature set | _fill in_ | XGBoost | _fill in_ | | |
-| 8 | Final model | _fill in_ | _fill in_ | Test AUC: _fill in_ | | Reported once |
+## 3. Random forest
 
-Findings so far: a due date on a weekend is the most useful calendar feature (payment tends to slip to Monday), and `due_month` adds nothing.
+Trees need no scaling, so the unscaled features are used.
 
-**Random vs time-based split.** The time-based split trains on the oldest 60% of invoices (Dec 2018 to Aug 2019), validates on the next 20% and tests on the newest 20% (Nov 2019 to Feb 2020). Its AUC is only about 0.006 lower than the random split, and the late rate is stable over time (0.43 / 0.43 / 0.39). The random split is therefore a reasonable estimate here.
+| Step | Model | Validation AUC |
+|---|---|---|
+| 3.2 | Decision tree, default settings | 0.750 |
+| 3.3 | Decision tree, `max_depth=25`, `min_samples_leaf=15` | 0.825 |
+| 3.4 | Random forest, 10 trees, default settings | 0.842 |
+| 3.6 | Random forest, 175 trees, `max_depth=45`, `min_samples_leaf=3` | **0.849** |
 
-## Still to do
+## 4. XGBoost
 
-- [ ] Random forest and XGBoost; choose the final model.
-- [ ] `train.py` (trains and saves the model, `DictVectorizer` and scaler with `pickle`).
-- [ ] `predict.py` (FastAPI) and a request example.
-- [ ] `Dockerfile` and `requirements.txt` (pinned versions).
-- [ ] "How to run" section with screenshots of the API working.
+Tuned one parameter at a time: `eta`, then `max_depth`, then `min_child_weight`.
+
+| Step | Model | Validation AUC |
+|---|---|---|
+| 4.1 | `eta=0.1`, `max_depth=6`, `min_child_weight=1`, 200 rounds | 0.855 |
+| 4.3 | `eta=0.5`, `max_depth=7`, `min_child_weight=2`, 200 rounds | **0.870** |
+
+## 5. Final test
+
+The final model is chosen by the validation AUC. The test AUC is shown as a check; it was not used to choose.
+
+| Model (trained on the 60% training set) | Validation AUC | Test AUC |
+|---|---|---|
+| Logistic regression | 0.8463 | 0.8439 |
+| Random forest | 0.8494 | 0.8533 |
+| **XGBoost** | **0.8700** | **0.8747** |
+
+**Final model: XGBoost.** Trained again on train + validation (80% of the data), its **test AUC is 0.8840**.
+
+## Next steps
+
+* `train.py` (trains the final XGBoost and saves it with the `DictVectorizer` using `pickle`).
+* `predict.py` (FastAPI) and a request example.
+* `Dockerfile` and `requirements.txt` (pinned versions).
+* "How to run" section with a screenshot of the API working.
 
 ## Library versions
 
@@ -71,9 +90,18 @@ scikit-learn 1.7.2, pandas 2.3.3, numpy 2.3.5, xgboost 3.4.1. (With pandas 3.x t
 ## Limitations
 
 - Training uses only invoices that were already paid. Invoices still open (posted after Feb 27, 2020) have no known outcome.
-- Customers repeat across the training, validation and test sets (about 98% of validation invoices belong to a customer seen in training), so the model mostly learns each customer's habits and may do worse with new customers.
 - The dataset has no official documentation; some column meanings are assumptions.
 
 ## How to run
 
-_To be completed after `train.py`, `predict.py` and the Dockerfile are ready._
+```bash
+pip install -r requirements.txt
+python train.py                                   # trains and saves model.bin
+docker build -t invoice-late-payment .
+docker run -it --rm -p 9696:9696 invoice-late-payment
+python test.py                                    # in another terminal
+```
+
+Expected answer: `{'late_probability': 0.302, 'late': False}`
+
+![API working](screenshot_test_py.png)
